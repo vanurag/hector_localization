@@ -3,6 +3,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Vector3Stamped.h>
 #include <sensor_msgs/Imu.h>
+#include <sensor_msgs/NavSatFix.h>
 #include <tf/transform_broadcaster.h>
 #include <tf/transform_listener.h> // for tf::getPrefixParam()
 #include <tf/transform_datatypes.h>
@@ -12,6 +13,7 @@
 std::string g_odometry_topic;
 std::string g_pose_topic;
 std::string g_imu_topic;
+std::string g_gps_topic("");
 std::string g_topic;
 std::string g_frame_id;
 std::string g_footprint_frame_id;
@@ -24,6 +26,8 @@ bool g_publish_roll_pitch;
 std::string g_tf_prefix;
 
 tf::TransformBroadcaster *g_transform_broadcaster;
+tf::StampedTransform imu_gps_tf;
+std::vector<geometry_msgs::TransformStamped> imu_gps_transforms;
 ros::Publisher g_pose_publisher;
 ros::Publisher g_euler_publisher;
 
@@ -165,6 +169,47 @@ void imuCallback(sensor_msgs::Imu const &imu) {
   }
 }
 
+void imu_gpsCallback1(sensor_msgs::Imu const &imu) {
+  
+  std::string child_frame_id;
+
+  imu_gps_tf.stamp_ = imu.header.stamp;
+
+  imu_gps_tf.frame_id_ = tf::resolve(g_tf_prefix, g_stabilized_frame_id);
+  if (!g_child_frame_id.empty()) child_frame_id = g_child_frame_id;
+  if (child_frame_id.empty()) child_frame_id = "base_link";
+
+  tf::Quaternion orientation;
+  tf::quaternionMsgToTF(imu.orientation, orientation);
+  tfScalar yaw, pitch, roll;
+  tf::Matrix3x3(orientation).getEulerYPR(yaw, pitch, roll);
+  tf::Quaternion rollpitch = tf::createQuaternionFromRPY(roll, pitch, 0.0);
+
+  // base_link transform (roll, pitch)
+  if (g_publish_roll_pitch) {
+    imu_gps_tf.child_frame_id_ = tf::resolve(g_tf_prefix, child_frame_id);
+    imu_gps_tf.setRotation(rollpitch);
+  }
+
+  // publish pose message
+  if (g_pose_publisher) {
+    geometry_msgs::PoseStamped pose_stamped;
+    pose_stamped.header.stamp = imu.header.stamp;
+    pose_stamped.header.frame_id = g_stabilized_frame_id;
+    tf::quaternionTFToMsg(rollpitch, pose_stamped.pose.orientation);
+    g_pose_publisher.publish(pose_stamped);
+  }
+}
+
+void imu_gpsCallback2(sensor_msgs::NavSatFix const &gps) {
+  std::string child_frame_id;
+
+  imu_gps_tf.setOrigin(tf::Vector3(gps.longitude, gps.latitude, gps.altitude));
+  addTransform(imu_gps_transforms, imu_gps_tf);
+
+  if (!imu_gps_transforms.empty()) g_transform_broadcaster->sendTransform(imu_gps_transforms);
+}
+
 void multiCallback(topic_tools::ShapeShifter const &input) {
   if (input.getDataType() == "nav_msgs/Odometry") {
     nav_msgs::Odometry::ConstPtr odom = input.instantiate<nav_msgs::Odometry>();
@@ -199,6 +244,7 @@ int main(int argc, char** argv) {
   priv_nh.getParam("odometry_topic", g_odometry_topic);
   priv_nh.getParam("pose_topic", g_pose_topic);
   priv_nh.getParam("imu_topic", g_imu_topic);
+  priv_nh.getParam("gps_topic", g_gps_topic);
   priv_nh.getParam("topic", g_topic);
   priv_nh.getParam("frame_id", g_frame_id);
   priv_nh.getParam("footprint_frame_id", g_footprint_frame_id);
@@ -212,6 +258,7 @@ int main(int argc, char** argv) {
       g_odometry_topic.clear();
       g_pose_topic.clear();
       g_imu_topic.clear();
+      g_gps_topic.clear();
   }
 
   g_publish_roll_pitch = true;
@@ -221,7 +268,7 @@ int main(int argc, char** argv) {
   g_transform_broadcaster = new tf::TransformBroadcaster;
 
   ros::NodeHandle node;
-  ros::Subscriber sub1, sub2, sub3, sub4;
+  ros::Subscriber sub1, sub2, sub3, sub4, sub5, sub6;
   int subscribers = 0;
   if (!g_odometry_topic.empty()) {
       sub1 = node.subscribe(g_odometry_topic, 10, &odomCallback);
@@ -231,8 +278,13 @@ int main(int argc, char** argv) {
       sub2 = node.subscribe(g_pose_topic, 10, &poseCallback);
       subscribers++;
   }
-  if (!g_imu_topic.empty()) {
+  if (!g_imu_topic.empty() && g_gps_topic.empty()) {
       sub3 = node.subscribe(g_imu_topic, 10, &imuCallback);
+      subscribers++;
+  }
+  if (! (g_imu_topic.empty() || g_gps_topic.empty()) ) {
+      sub5 = node.subscribe(g_imu_topic, 10, &imu_gpsCallback1);
+      sub6 = node.subscribe(g_gps_topic, 10, &imu_gpsCallback2);
       subscribers++;
   }
   if (!g_topic.empty()) {
