@@ -31,6 +31,33 @@ std::vector<geometry_msgs::TransformStamped> imu_gps_transforms;
 ros::Publisher g_pose_publisher;
 ros::Publisher g_euler_publisher;
 
+
+////////////////////// Calibration Data //////////////////////
+// imu0(vi-sensor) to mavros(px4 state estimator)
+tf::Matrix3x3 R_imu0_mavros(0.0047009 , -0.99992521,  0.0112908,
+                           -0.99997648, -0.00475693, -0.00494021,
+                            0.00499355, -0.01126731, -0.99992405);
+tf::Vector3 t_imu0_mavros(-0.03532628,  0.03224448,  0.01215357);
+
+// mavros(px4 state estimator) to world
+tf::Matrix3x3 R_mavros_W;
+tf::Vector3 t_mavros_W;
+
+// cam1(monocular vi-sensor) to imu0(vi-sensor)
+tf::Matrix3x3 R_cam1_imu0(0.00111144, 0.99999923, 0.00055929,
+                         -0.42368471, 0.00097752, -0.9058092,
+                         -0.90580905, 0.00076979, 0.42368546);
+tf::Vector3 t_cam1_imu0(-0.01888825, -0.22702259, 0.00829739);
+
+// pre-computed part of cam1 to world
+tf::Matrix3x3 R_cam1_W_precomp = R_imu0_mavros * R_cam1_imu0;
+tf::Vector3 t_cam1_W_precomp = R_imu0_mavros * t_cam1_imu0 + t_imu0_mavros;
+
+// cam1 to world will be computed as new pose updates arrive
+tf::Matrix3x3 R_cam1_W;
+tf::Vector3 t_cam1_W;
+//////////////////////////////////////////////////////////////
+
 #ifndef TF_MATRIX3x3_H
   typedef btScalar tfScalar;
   namespace tf { typedef btMatrix3x3 Matrix3x3; }
@@ -182,21 +209,21 @@ void imu_gpsCallback1(sensor_msgs::Imu const &imu) {
   tf::Quaternion orientation;
   tf::quaternionMsgToTF(imu.orientation, orientation);
   tfScalar yaw, pitch, roll;
-  tf::Matrix3x3(orientation).getEulerYPR(yaw, pitch, roll);
-  tf::Quaternion rollpitch = tf::createQuaternionFromRPY(roll, pitch, 0.0);
+  R_mavros_W = tf::Matrix3x3(orientation);
+  R_cam1_W = R_mavros_W * R_cam1_W_precomp;
+  
+  R_cam1_W.getEulerYPR(yaw, pitch, roll);
+  tf::Quaternion cam_orientation = tf::createQuaternionFromRPY(roll, pitch, yaw);
 
-  // base_link transform (roll, pitch)
-  if (g_publish_roll_pitch) {
-    imu_gps_tf.child_frame_id_ = tf::resolve(g_tf_prefix, child_frame_id);
-    imu_gps_tf.setRotation(rollpitch);
-  }
+  imu_gps_tf.child_frame_id_ = tf::resolve(g_tf_prefix, child_frame_id);
+  imu_gps_tf.setRotation(cam_orientation);
 
   // publish pose message
   if (g_pose_publisher) {
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = imu.header.stamp;
     pose_stamped.header.frame_id = g_stabilized_frame_id;
-    tf::quaternionTFToMsg(rollpitch, pose_stamped.pose.orientation);
+    tf::quaternionTFToMsg(orientation, pose_stamped.pose.orientation);
     g_pose_publisher.publish(pose_stamped);
   }
 }
@@ -204,7 +231,9 @@ void imu_gpsCallback1(sensor_msgs::Imu const &imu) {
 void imu_gpsCallback2(sensor_msgs::NavSatFix const &gps) {
   std::string child_frame_id;
 
-  imu_gps_tf.setOrigin(tf::Vector3(gps.longitude, gps.latitude, gps.altitude));
+  t_mavros_W = tf::Vector3(gps.longitude, gps.latitude, gps.altitude);
+  t_cam1_W = R_mavros_W * t_cam1_W_precomp + t_mavros_W;
+  imu_gps_tf.setOrigin(t_mavros_W);
   addTransform(imu_gps_transforms, imu_gps_tf);
 
   if (!imu_gps_transforms.empty()) g_transform_broadcaster->sendTransform(imu_gps_transforms);
