@@ -4,6 +4,7 @@
 #include <geometry_msgs/Vector3Stamped.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/NavSatFix.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <tf/transform_broadcaster.h>
 #include <tf/transform_listener.h> // for tf::getPrefixParam()
 #include <tf/transform_datatypes.h>
@@ -228,10 +229,12 @@ void imu_gpsCallback1(sensor_msgs::Imu const &imu) {
   }
 }
 
-void imu_gpsCallback2(sensor_msgs::NavSatFix const &gps) {
+void imu_gpsCallback2(geometry_msgs::PoseWithCovarianceStamped const &utm_pose) {
   std::string child_frame_id;
 
-  t_mavros_W = tf::Vector3(gps.longitude, gps.latitude, gps.altitude);
+  // UTM (X: east, Y: north, Z: up) -> plane Roll (North), Pitch (East), Yaw (Down)
+  t_mavros_W = tf::Vector3(
+      utm_pose.pose.pose.position.y, utm_pose.pose.pose.position.x, -utm_pose.pose.pose.position.z);
   t_cam1_W = R_mavros_W * t_cam1_W_precomp + t_mavros_W;
   imu_gps_tf.setOrigin(t_mavros_W);
   addTransform(imu_gps_transforms, imu_gps_tf);
